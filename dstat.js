@@ -1143,9 +1143,6 @@ module.exports.startDstat = async function startDstat(chatId, sock, sendMessageF
   if (!(dstatTimers instanceof Map)) dstatTimers = new Map();
   if (dstatTimers.has(chatId)) { const old = dstatTimers.get(chatId); if (old.cleanup) await old.cleanup(); dstatTimers.delete(chatId); }
   await initRedis();
-  try {
-    execSync("zrok enable QtTOOBFatWIW", { stdio: "ignore" });
-  } catch (e) {}
   const PORT = 1000 + Math.floor(Math.random() * 8001);
   const PREPARE_DURATION = 60000, ACTIVE_DURATION = 200000, COOLDOWN_DURATION = 60000;
   let state = 'IDLE', timers = { prepare: null, active: null, cooldown: null, updateInterval: null, rpsInterval: null }, tunnels = [], tunnelUrl = null, msgKey = null, prepareStart = 0, activeStart = 0, cooldownStart = 0, server = null, wss = null;
@@ -1497,18 +1494,23 @@ module.exports.startDstat = async function startDstat(chatId, sock, sendMessageF
     });
   });
   const startTunnel = () => {
-    const t = spawn("zrok", ["share", "public", `http://127.0.0.1:${PORT}`, "--backend-mode", "proxy", "--headless", "--insecure"]);
+    const cloudflaredPath = path.join(process.env.HOME || "~", "cloudflared");
+    const t = spawn(cloudflaredPath, ["tunnel", "--url", `http://127.0.0.1:${PORT}`]);
+    console.log(`[DEBUG] Starting cloudflared tunnel on port ${PORT} using ${cloudflaredPath}`);
     t.on("error", (err) => {
+      console.error(`[DEBUG] cloudflared error: ${err.message}`);
       logger.error(`Tunnel spawn error: ${err.message}`);
       if (!initialSent) {
-        sock.sendMessage(chatId, { text: "❌ Gagal membuat tunnel zrok." }).catch(e => logger.error("Gagal kirim pesan error:", e));
+        sock.sendMessage(chatId, { text: "❌ Gagal membuat tunnel cloudflared. Pastikan binary ada." }).catch(e => logger.error(e));
         initialSent = true;
       }
     });
     t.stdout.on("data", (data) => {
       const text = data.toString();
-      const match = text.match(/https:\/\/[a-z0-9-]+\.shares\.zrok\.io/i);
+      console.log(`[DEBUG] cloudflared stdout: ${text.trim()}`);
+      const match = text.match(/https:\/\/[a-z0-9.-]+\.trycloudflare\.com/i);
       if (match && !tunnelUrlSet && !initialSent) {
+        console.log(`[DEBUG] URL detected: ${match[0]}`);
         tunnelUrlSet = true;
         tunnelUrl = match[0];
         sendInitialMessage(tunnelUrl).catch(err => logger.error(err));
@@ -1516,8 +1518,10 @@ module.exports.startDstat = async function startDstat(chatId, sock, sendMessageF
     });
     t.stderr.on("data", (data) => {
       const text = data.toString();
-      const match = text.match(/https:\/\/[a-z0-9-]+\.shares\.zrok\.io/i);
+      console.error(`[DEBUG] cloudflared stderr: ${text.trim()}`);
+      const match = text.match(/https:\/\/[a-z0-9.-]+\.trycloudflare\.com/i);
       if (match && !tunnelUrlSet && !initialSent) {
+        console.log(`[DEBUG] URL detected from stderr: ${match[0]}`);
         tunnelUrlSet = true;
         tunnelUrl = match[0];
         sendInitialMessage(tunnelUrl).catch(err => logger.error(err));
@@ -1525,7 +1529,11 @@ module.exports.startDstat = async function startDstat(chatId, sock, sendMessageF
     });
     return t;
   };
-  server.listen(PORT, "127.0.0.1", () => logger.info(`[DSTAT] Server on ${PORT}`));
+  server.listen(PORT, "127.0.0.1", () => {
+    logger.info(`[DSTAT] Server on ${PORT}`);
+    console.log(`[DEBUG] HTTP server listening on 127.0.0.1:${PORT}`);
+    tunnels.push(startTunnel());
+  });
   let initialSent = false, tunnelUrlSet = false;
   async function sendInitialMessage(url) {
     if (initialSent) return;
@@ -1538,6 +1546,5 @@ module.exports.startDstat = async function startDstat(chatId, sock, sendMessageF
       try { const sent = await sock.sendMessage(chatId, { text: `🚀 DSTAT ACTIVE\nTunnel URL: ${url}\nMemulai dalam ${Math.floor(PREPARE_DURATION / 1000)} detik.` }); msgKey = sent.key; await transitionTo('PREPARING'); } catch (e2) { logger.error("Gagal kirim pesan teks juga:", e2); }
     }
   }
-  tunnels.push(startTunnel());
   dstatTimers.set(chatId, { cleanup: finishAndSendReport });
 };
